@@ -1,0 +1,172 @@
+Metadata-Version: 2.4
+Name: cohortlearn
+Version: 0.1.0
+Summary: Matched cohort construction from electronic health records under target trial emulation
+Author-email: Zeinab Ghannam <z.ghannam@imperial.ac.uk>
+License: MIT
+Keywords: causal inference,target trial emulation,propensity score matching,electronic health records,epidemiology
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+Requires-Dist: numpy>=1.22
+Requires-Dist: pandas>=1.5
+Requires-Dist: scikit-learn>=1.1
+Requires-Dist: matplotlib>=3.5
+Requires-Dist: lifelines>=0.27
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
+
+# CohortLearn
+
+Build matched exposed and unexposed cohorts from electronic health records, under
+the target trial emulation framework.
+
+Two problems get in the way of causal analysis on EHR data. Cohorts assembled by
+hand pick up design bias: follow-up that starts before eligibility is confirmed,
+eligibility decided using records that postdate time zero, or controls drawn from a
+different calendar period. Separately, realistic studies need many confounders at
+once, and exact matching on all of them leaves the strata empty.
+
+CohortLearn addresses both. Time zero is aligned across arms, and controls are drawn
+by risk-set sampling using only pre-baseline records. The confounder set is then
+collapsed to a single propensity score and matched.
+
+Nothing about the clinical question is fixed in the code. You supply the exposure,
+the outcome and the confounders as ICD code prefixes.
+
+## Install
+
+```bash
+git clone https://github.com/ghannamzeinab/cohortlearn.git
+cd cohortlearn
+pip install -e .
+```
+
+## Quick start
+
+```python
+from cohortlearn import CohortBuilder, PSMCalculator, SurvivalAnalyser
+
+CONF = {
+    "exposure_codes": ["F32", "F33"],
+    "outcome_codes":  ["F00", "G30"],
+    "confounder_codes": {
+        "hypertension": ["I10", "I11"],
+        "anxiety":      ["F40", "F41"],
+    },
+    "demographic_confounders": {"age": True, "sex": True, "bmi": True,
+                                "education": True, "risk_allele": False},
+    "age_range": (18, 110),
+}
+
+builder = CohortBuilder(washout_months=12, **CONF)
+builder.attach_dataframes(icd10_long=icd10_long_df,
+                          demographics=demographics_df,
+                          bmi=bmi_df)
+
+cases    = builder.build_case_cohort()
+controls = builder.build_control_cohort(cases)
+master   = builder.build_master_df(cases, controls)
+
+psm = PSMCalculator(master, exact_match_cols=["Sex"], ratio=3)
+psm.fit()
+psm.match()
+
+psm.balance_table()
+psm.plot_smd()
+psm.plot_overlap()
+psm.strata_table()
+
+sa = SurvivalAnalyser(psm.matched_cohort, study_end="2024-12-31")
+sa.prepare()
+sa.fit(adjusted=True, cluster=True)
+sa.summary(exposure_only=True)
+sa.e_value()
+```
+
+Or run the whole pipeline from the command line:
+
+```bash
+python scripts/generate_synthetic_data.py
+python scripts/run_pipeline.py --data-dir data --out-dir outputs
+python scripts/run_pipeline.py --data-dir data --sweep 12 24 36 60 120
+```
+
+## Input format
+
+Flat tables. No common data model required.
+
+| File | Rows | Columns |
+|---|---|---|
+| diagnoses | one per coded diagnosis | `id`, `code`, `date` |
+| demographics | one per participant | `id`, `Sex`, `YOB`, `Education`, `Date of Death` |
+| bmi (optional) | one per participant | `id`, `BMI` |
+| genotype (optional) | one per participant | `id`, plus one genotype column |
+
+The diagnosis table also defines each participant's observation span, taken as their
+first and last coded dates.
+
+## Modules
+
+| File | Contents |
+|---|---|
+| `cohort.py` | `CohortBuilder`, `CONSORTTracker`, `rename_id` |
+| `matching.py` | `PSMCalculator` |
+| `survival.py` | `SurvivalAnalyser`, `full_rank_covariates` |
+| `scripts/generate_synthetic_data.py` | synthetic dataset generator |
+| `scripts/run_pipeline.py` | end-to-end runner |
+
+## What the library does
+
+**Cohort construction.** Time zero for an exposed participant is their first exposure
+code. Time zero for an unexposed participant is drawn from the observed exposed time
+zeros, accepted only if that person is alive, under observation, outcome-free and
+unexposed on that date. Participants who are unexposed early and exposed later
+contribute their unexposed time and are censored at exposure onset. Prevalent
+outcomes are excluded, and a configurable washout window removes outcomes that were
+already developing at time zero.
+
+**Matching.** Propensity scores come from regularised logistic regression. Matching
+is greedy nearest neighbour on the logit score, without replacement, 1:k, inside
+exact strata for sex and a two-year index-period bucket, with a caliper of 0.2
+standard deviations.
+
+**Validation.** Standardised mean differences before and after matching, a Love plot,
+propensity overlap plots, and a stratum composition table.
+
+**Outcome stage.** Cox regression with target-trial censoring, standard errors
+clustered on participant, a proportional hazards check, and E-values for unmeasured
+confounding.
+
+## Tests
+
+```bash
+pip install -e ".[dev]"
+pytest -q
+```
+
+## Synthetic dataset
+
+The deposited dataset is archived at Zenodo: [DOI].
+
+Exposure depends on the covariates, so there is real confounding to remove, and the
+outcome depends on exposure with a known coefficient, so the recovered estimate can
+be checked against the truth. The generator is seeded.
+
+## Scope and limitations
+
+- Point-exposure, new-user design. Sustained treatment strategies, grace periods and
+  time-varying confounding are not supported.
+- Diagnoses are assumed ICD-coded. Other vocabularies need mapping first.
+- One matching algorithm. For a wider range, see MatchIt (R).
+- The propensity model is L2-penalised, and covariates are not scaled before the
+  penalty is applied.
+
+## Citation
+
+[Paper citation once available.]
+
+Archived releases: [Zenodo DOI].
+
+## License
+
+MIT. See `LICENSE`.

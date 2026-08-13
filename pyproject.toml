@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cohortlearn"
+version = "0.1.0"
+description = "Matched cohort construction from electronic health records under target trial emulation"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "Zeinab Ghannam", email = "z.ghannam@imperial.ac.uk"}]
+keywords = ["causal inference", "target trial emulation", "propensity score matching",
+            "electronic health records", "epidemiology"]
+dependencies = [
+    "numpy>=1.22",
+    "pandas>=1.5",
+    "scikit-learn>=1.1",
+    "matplotlib>=3.5",
+    "lifelines>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
