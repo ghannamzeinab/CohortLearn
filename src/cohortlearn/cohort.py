@@ -24,6 +24,29 @@ def rename_id(df: pd.DataFrame) -> pd.DataFrame:
     raise KeyError(f"No id-like column found. Looked for {ID_ALIASES}.")
 
 
+def to_datetime_safe(values, field):
+    """Parse a date column without pandas' epoch-nanoseconds fallback.
+
+    pd.to_datetime(20100101) silently yields 1970-01-01, so an integer YYYYMMDD
+    column would corrupt every date. Numeric input is read as YYYYMMDD instead,
+    timezone-aware input is flattened, and anything unreadable raises.
+    """
+    s = pd.Series(values).copy()
+    if pd.api.types.is_numeric_dtype(s):
+        digits = s.dropna().astype("int64").astype(str)
+        out = pd.to_datetime(digits.reindex(s.index), format="%Y%m%d", errors="coerce")
+    else:
+        out = pd.to_datetime(s, errors="coerce")
+    if getattr(out.dtype, "tz", None) is not None:
+        out = out.dt.tz_localize(None)
+    unreadable = out.isna() & s.notna()
+    if unreadable.any():
+        raise ValueError(
+            f"{int(unreadable.sum()):,} unparseable value(s) in '{field}', "
+            f"e.g. {s[unreadable].iloc[0]!r}. Supply ISO dates or YYYYMMDD.")
+    return out
+
+
 class CONSORTTracker:
     """Keeps the participant-flow counts so the CONSORT diagram writes itself."""
 
@@ -117,6 +140,26 @@ class CohortBuilder:
     def _read_any(self, path):
         return pd.read_parquet(path) if str(path).endswith(".parquet") else pd.read_csv(path, low_memory=False)
 
+    def _harmonise_long_icd(self, df):
+        """Normalise the long table once: id, upper-cased code, real datetimes."""
+        out = rename_id(df.copy())
+        out = out[["id", "code", "date"]].copy()
+        out["code"] = out["code"].astype("string").str.strip().str.upper()
+        out["date"] = to_datetime_safe(out["date"], "date")
+        n0 = len(out)
+        out = out.dropna(subset=["id", "code", "date"])
+        out = out[out["code"] != ""]
+        if n0 - len(out):
+            warnings.warn(f"dropped {n0 - len(out):,} diagnosis rows with a missing "
+                            f"id, code or date.", UserWarning, stacklevel=3)
+        return out.drop_duplicates(["id", "code", "date"]).reset_index(drop=True)
+
+    def _harmonise_demographics(self):
+        """Parse the one date column demographics may carry."""
+        if "Date of Death" in self.demographics.columns:
+            self.demographics["Date of Death"] = to_datetime_safe(
+                self.demographics["Date of Death"], "Date of Death")
+
     def _prepare_long_icd(self, df):
         """Turn a wide UKB table (diagnosis_* / datediagnosis_*) into long [id, code, date]."""
         df = rename_id(df)
@@ -159,10 +202,9 @@ class CohortBuilder:
             self.risk_allele = rename_id(self._read_any(self.risk_allele_path))
             self._check_risk_allele_col()
 
+        self._harmonise_demographics()
         if {"code", "date"}.issubset(icd10.columns):
-            icd10 = icd10[["id", "code", "date"]].copy()
-            icd10["date"] = pd.to_datetime(icd10["date"])
-            self.icd10_long = icd10
+            self.icd10_long = self._harmonise_long_icd(icd10)
         else:
             self.icd10_long = self._prepare_long_icd(icd10)
         print(f"Long ICD rows: {len(self.icd10_long):,} | ids: {self.icd10_long['id'].nunique():,}")
@@ -170,12 +212,12 @@ class CohortBuilder:
 
     def attach_dataframes(self, icd10_long, demographics, bmi, risk_allele=None):
         """Inject already-loaded frames instead of reading from disk."""
-        self.icd10_long = rename_id(icd10_long.copy())
+        self.icd10_long = self._harmonise_long_icd(icd10_long) # Renaming of aliases handled in _harmonise_long_icd alongside other harmonisation steps
         self.demographics = rename_id(demographics.copy())
         self.bmi = rename_id(bmi.copy())
         if "Year of Birth" in self.demographics.columns and "YOB" not in self.demographics.columns:
             self.demographics = self.demographics.rename(columns={"Year of Birth": "YOB"})
-        self.icd10_long["date"] = pd.to_datetime(self.icd10_long["date"])
+        self._harmonise_demographics()
         if risk_allele is not None:
             self.risk_allele = rename_id(risk_allele.copy())
             self._check_risk_allele_col()
@@ -360,6 +402,13 @@ class CohortBuilder:
         self.consort.log("after_outcome_exclusions", len(idx))
         cohort = idx.merge(self.demographics, on="id", how="left")
         cohort = self._add_demographic_features(cohort, preserve_cols=["exposure_code", "first_outcome_date"])
+        
+        if "Date of Death" in cohort.columns:
+            death = pd.to_datetime(cohort["Date of Death"])
+            after_death = death.notna() & (death < cohort["index_date"])
+            if after_death.any():
+                self.consort.log("excluded_exposure_after_death", int(after_death.sum()))
+                cohort = cohort[~after_death].copy()
 
         if "age_at_index" in cohort.columns:
             n0 = len(cohort)
@@ -530,7 +579,8 @@ class CohortBuilder:
             rows = np.where((sex_vals == s) & valid.values & ~assigned)[0]
             leftover = _draw(by_sex.get(s), rows)          # same-sex first
             _draw(all_dates, leftover)                     # fall back to all cases
-
+        
+        self.consort.log("controls_no_eligible_window", int((~valid.values).sum()))
         self.consort.log("controls_no_valid_riskset_date", int((valid.values & ~assigned).sum()))
 
         ctrl["index_date"] = pd.NaT
