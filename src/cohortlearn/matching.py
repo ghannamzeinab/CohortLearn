@@ -33,7 +33,12 @@ class PSMCalculator:
         calendar_col / calendar_bucket_years / calendar_exact : force cases and their
             controls into the same time window; set calendar_exact=False to switch off.
         """
-        self.master = master.copy()
+        if not (isinstance(ratio, (int, np.integer)) and ratio >= 1):
+            raise ValueError(f"ratio must be an integer >= 1, got {ratio!r}.")
+        if not (np.isscalar(caliper_sd) and caliper_sd > 0):
+            raise ValueError(f"caliper_sd must be > 0, got {caliper_sd!r}.")
+
+        self.master = master.reset_index(drop=True)
         self.treatment_col = treatment_col
         self.ratio = ratio
         self.caliper_sd = caliper_sd
@@ -132,7 +137,7 @@ class PSMCalculator:
             for pos in order:
                 case = cases.iloc[pos]
                 diff = np.abs(ctrl_ps - case["ps_logit"])
-                cand = np.where((diff <= self._caliper) & ~ctrl_used)[0]
+                cand = np.where((diff <= self._caliper) & ~ctrl_used & (ctrl_ids != case["id"]))[0] # Explicitly exclude self-match
                 if cand.size == 0:
                     continue
                 pick = cand[np.argsort(diff[cand])[: self.ratio]]
@@ -205,35 +210,60 @@ class PSMCalculator:
         for col in ["age_at_index", "BMI"]:
             if col in df.columns:
                 tv, cv = pd.to_numeric(t[col], errors="coerce"), pd.to_numeric(c[col], errors="coerce")
+                vr = cv.var(ddof=1) / tv.var(ddof=1) if tv.var(ddof=1) else np.nan
                 rows.append([col, f"{tv.mean():.2f}\u00b1{tv.std():.2f}",
-                             f"{cv.mean():.2f}\u00b1{cv.std():.2f}", self._smd_cont(tv, cv)])
-        bins = (["Sex"] + sorted(x for x in df.columns if x.startswith("pre_"))
+                             f"{cv.mean():.2f}\u00b1{cv.std():.2f}",
+                             self._smd_cont(tv, cv), vr])
+        bins = (sorted(x for x in df.columns if x.startswith("pre_"))
                 + sorted(x for x in df.columns if x.startswith("edu_")))
         for col in bins:
+            tv, cv = pd.to_numeric(t[col], errors="coerce"), pd.to_numeric(c[col], errors="coerce")
+            rows.append([col, f"{tv.mean()*100:.1f}%", f"{cv.mean()*100:.1f}%",
+                         self._smd_bin(tv, cv), np.nan])
+        # Sex and APOE are compared level by level, so any coding works: 0/1, 1/2
+        # or 'M'/'F'. Treating a 1/2 column as an indicator gives a mean of 1.5,
+        # a negative variance and a NaN SMD.
+        for col in ["Sex", "APOE"]:
             if col in df.columns:
-                tv, cv = pd.to_numeric(t[col], errors="coerce"), pd.to_numeric(c[col], errors="coerce")
-                rows.append([col, f"{tv.mean()*100:.1f}%", f"{cv.mean()*100:.1f}%", self._smd_bin(tv, cv)])
-        if "APOE" in df.columns:
-            for lvl in sorted(df["APOE"].dropna().unique()):
-                ti = (t["APOE"] == lvl).astype(float)
-                ci = (c["APOE"] == lvl).astype(float)
-                rows.append([f"APOE {lvl}", f"{ti.mean()*100:.1f}%", f"{ci.mean()*100:.1f}%", self._smd_bin(ti, ci)])
-        return pd.DataFrame(rows, columns=["covariate", "exposed", "control", "SMD"])
+                for lvl in sorted(df[col].dropna().unique()):
+                    ti = (t[col] == lvl).astype(float)
+                    ci = (c[col] == lvl).astype(float)
+                    rows.append([f"{col} {lvl}", f"{ti.mean()*100:.1f}%",
+                                 f"{ci.mean()*100:.1f}%", self._smd_bin(ti, ci), np.nan])
+        return pd.DataFrame(rows, columns=["covariate", "exposed", "control",
+                                           "SMD", "variance_ratio"])
 
-    def balance_table(self, verbose=True):
-        """SMD for every covariate, before and after matching. |SMD| <= 0.1 is the target."""
+    def balance_table(self, verbose=True, vr_bounds=(0.8, 1.25)):
+        """SMD before and after matching, plus the variance ratio.
+
+        |SMD| <= 0.1 is the target. An SMD compares first moments only, so a
+        variance ratio outside vr_bounds means the distributions still differ
+        even when every SMD passes.
+        """
         if self.matched_cohort is None:
             raise RuntimeError("Run match() first.")
         post = self._one_balance(self.matched_cohort)
         pre = self._one_balance(self.master)[["covariate", "SMD"]].rename(columns={"SMD": "SMD_pre"})
         tbl = (post.merge(pre, on="covariate", how="left")
-                   [["covariate", "exposed", "control", "SMD_pre", "SMD"]]
+                   [["covariate", "exposed", "control", "SMD_pre", "SMD", "variance_ratio"]]
                    .rename(columns={"SMD": "SMD_post"}))
+        lo, hi = vr_bounds
+        vr = tbl["variance_ratio"]
+        tbl["imbalanced"] = ((tbl["SMD_post"].abs() > 0.1)
+                             | tbl["SMD_post"].isna()
+                             | (vr.notna() & ((vr < lo) | (vr > hi))))
         if verbose:
             with pd.option_context("display.float_format", lambda v: f"{v:.3f}"):
                 print(tbl.to_string(index=False))
             print(f"\nmax |SMD| post-match : {tbl['SMD_post'].abs().max():.3f}")
-            print(f"covariates |SMD|>0.1 : {(tbl['SMD_post'].abs() > 0.1).sum()} of {len(tbl)}")
+            print(f"covariates flagged   : {int(tbl['imbalanced'].sum())} of {len(tbl)}")
+            if tbl["SMD_post"].isna().any():
+                print(f"  !! {int(tbl['SMD_post'].isna().sum())} covariate(s) could not "
+                      f"be assessed and are counted as imbalanced")
+            out_of_band = tbl.loc[vr.notna() & ((vr < lo) | (vr > hi)), "covariate"].tolist()
+            if out_of_band:
+                print(f"  !! variance ratio outside {vr_bounds} for: "
+                      f"{', '.join(out_of_band)} -- means match but spreads do not")
         self.balance_ = tbl
         return tbl
 
@@ -330,8 +360,12 @@ class PSMCalculator:
                              "font.size": 9, "axes.spines.top": False, "axes.spines.right": False})
         c_pre, c_post = "#B0B0B0", "#C44E52"
 
-        d = tbl.dropna(subset=["SMD_pre", "SMD_post"]).copy()
-        d["abs_pre"], d["abs_post"] = d["SMD_pre"].abs(), d["SMD_post"].abs()
+        d = tbl.copy()
+        if d["SMD_pre"].isna().any() or d["SMD_post"].isna().any():
+            warnings.warn(f"{int(d['SMD_post'].isna().sum())} covariate(s) have no "
+                          f"computable SMD and are plotted at zero with a marker.")
+        d["abs_pre"] = d["SMD_pre"].abs().fillna(0.0)
+        d["abs_post"] = d["SMD_post"].abs().fillna(0.0)
         d = d.sort_values("abs_pre").reset_index(drop=True)
         y = np.arange(len(d))
 
@@ -342,7 +376,13 @@ class PSMCalculator:
         ax.scatter(d["abs_pre"], y, s=34, color=c_pre, zorder=2, label="Before matching")
         ax.scatter(d["abs_post"], y, s=34, color=c_post, zorder=3, label="After matching")
 
-        ax.set_yticks(y); ax.set_yticklabels(d["covariate"])
+        unknown = d["SMD_post"].isna().to_numpy()
+        if unknown.any():
+            ax.scatter(d.loc[unknown, "abs_post"], y[unknown], s=90, facecolors="none",
+                       edgecolors="0.2", linewidths=1.1, zorder=4, label="not assessable")
+        ax.set_yticks(y)
+        ax.set_yticklabels([f"{n} (n/a)" if u else n
+                            for n, u in zip(d["covariate"], unknown)])
         ax.set_xlabel("Absolute standardized mean difference")
         ax.set_title("Covariate balance before and after matching", fontsize=10, pad=8)
         ax.set_xlim(left=0)
