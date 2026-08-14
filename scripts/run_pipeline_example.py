@@ -68,9 +68,13 @@ def build_and_match(icd, demo, bmi, washout_months, ratio=3, caliper_sd=0.2, see
     cases = builder.build_case_cohort()
     controls = builder.build_control_cohort(cases, seed=seed)
     master = builder.build_master_df(cases, controls)
+    # Stratify age into bands for matching, this gives a more representative distribution of controls across the age range, rather than just matching the mean
+    master = master.assign(
+        age_band=pd.cut(master["age_at_index"], [0, 40, 50, 60, 70, 80, 200],
+                        right=False).astype(str))
 
     psm = PSMCalculator(master, treatment_col="is_exposed",
-                        exact_match_cols=["Sex"], ratio=ratio,
+                        exact_match_cols=["Sex", "age_band"], ratio=ratio,
                         caliper_sd=caliper_sd, calendar_bucket_years=2,
                         calendar_exact=True, consort=builder.consort,
                         random_state=seed)
@@ -105,6 +109,8 @@ def main():
     print("\n=== participant flow ===")
     builder.consort.summary()
 
+    print("\n=== look-back symmetry ===")
+    builder.lookback_report(builder.cases, builder.controls)
     print("\n=== balance ===")
     psm.balance_table()
     psm.plot_overlap(save_path=os.path.join(args.out_dir, "ps_overlap.pdf"))

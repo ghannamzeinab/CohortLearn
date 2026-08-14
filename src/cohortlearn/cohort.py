@@ -589,6 +589,29 @@ class CohortBuilder:
         ctrl = ctrl.drop(columns=["dep_onset", "dem_onset", "obs_start", "obs_end"], errors="ignore")
         return ctrl
 
+    def lookback_report(self, case_cohort, control_pool, tolerance_years=1.0):
+        """Compare how much record history each arm has before time zero."""
+        span = (self.icd10_long.groupby("id")["date"].min()
+                    .rename("obs_start").reset_index())
+        means = {}
+        for name, arm in [("exposed", case_cohort), ("unexposed", control_pool)]:
+            merged = arm[["id", "index_date"]].merge(span, on="id", how="left")
+            years = (merged["index_date"] - merged["obs_start"]).dt.days / 365.25
+            means[name] = years.mean()
+            print(f"  {name:<10} look-back years  mean {years.mean():6.2f}  "
+                  f"median {years.median():6.2f}  10th pct {years.quantile(.10):6.2f}")
+        gap = means["exposed"] - means["unexposed"]
+        print(f"  difference in mean look-back: {gap:+.2f} years")
+        if abs(gap) > tolerance_years:
+            warnings.warn(
+                f"Mean look-back differs by {gap:+.2f} years between arms. Every "
+                f"pre_<name> confounder is measured over a different window, so "
+                f"the arms are differentially ascertained and matching cannot "
+                f"correct it. Consider requiring a common minimum look-back.",
+                UserWarning, stacklevel=2)
+        self.lookback_ = means
+        return means
+    
     def build_master_df(self, case_cohort, control_pool):
         """Stack the two arms into one model-ready frame."""
         if case_cohort is None or case_cohort.empty:
