@@ -14,6 +14,7 @@ class PSMCalculator:
     DEFAULT_CONTINUOUS = ["age_at_index", "BMI"]
     DEFAULT_EXACT = ["Sex"]
     STRATUM_SEP = "||"
+    PS_GRID = 1e-4          # matching resolution on the logit scale
 
     # WHO adult BMI bands.
     BMI_BINS = [0, 18.5, 25, 30, 35, 40, np.inf]
@@ -87,12 +88,19 @@ class PSMCalculator:
         df = self.master
         X = self._design_matrix(df)
         y = df[self.treatment_col].astype(int).values
-        self.ps_model = LogisticRegression(max_iter=2000, solver="lbfgs")
+        # Tight convergence, so the fitted scores do not depend on where the
+        # solver happens to stop on a given CPU.
+        self.ps_model = LogisticRegression(max_iter=20000, solver="lbfgs", tol=1e-10)
         self.ps_model.fit(X.values, y)
         p = np.clip(self.ps_model.predict_proba(X.values)[:, 1], 1e-6, 1 - 1e-6)
         self.master["ps"] = p
         self.master["ps_logit"] = np.log(p / (1 - p))
         self._caliper = self.caliper_sd * self.master["ps_logit"].std(ddof=1)
+        # Matching runs on an integer grid of PS_GRID logit units. Distances and
+        # the caliper test are then exact, so last-digit floating-point
+        # differences between machines cannot flip a match.
+        self.master["_ps_grid"] = np.rint(self.master["ps_logit"] / self.PS_GRID).astype(np.int64)
+        self._caliper_grid = int(np.rint(self._caliper / self.PS_GRID))
         print(f"Propensity model fitted on {X.shape[1]} features. Caliper = {self._caliper:.4f} (logit).")
         return self
 
@@ -129,18 +137,18 @@ class PSMCalculator:
             if cases.empty or controls.empty:
                 continue
 
-            ctrl_ps = controls["ps_logit"].to_numpy()
+            ctrl_ps = controls["_ps_grid"].to_numpy()
             ctrl_used = np.zeros(len(controls), dtype=bool)
             ctrl_ids = controls["id"].to_numpy()
 
             order = rng.permutation(len(cases))
             for pos in order:
                 case = cases.iloc[pos]
-                diff = np.abs(ctrl_ps - case["ps_logit"])
-                cand = np.where((diff <= self._caliper) & ~ctrl_used & (ctrl_ids != case["id"]))[0] # Explicitly exclude self-match
+                diff = np.abs(ctrl_ps - case["_ps_grid"])
+                cand = np.where((diff <= self._caliper_grid) & ~ctrl_used & (ctrl_ids != case["id"]))[0] # Explicitly exclude self-match
                 if cand.size == 0:
                     continue
-                pick = cand[np.argsort(diff[cand])[: self.ratio]]
+                pick = cand[np.argsort(diff[cand], kind="stable")[: self.ratio]]
                 ctrl_used[pick] = True
                 n_cases_matched += 1
                 n_controls += len(pick)
@@ -161,7 +169,7 @@ class PSMCalculator:
         matched["match_id"] = match_ids
         matched["matched_case_id"] = match_ids
         matched = matched.reset_index(drop=True)
-        matched = matched.drop(columns=["_stratum", "_cal_bucket"], errors="ignore")
+        matched = matched.drop(columns=["_stratum", "_cal_bucket", "_ps_grid"], errors="ignore")
         ratio_achieved = n_controls / n_cases_matched if n_cases_matched else 0.0
 
         for k, v in [("cases_entering_psm", n_cases_in), ("cases_matched", n_cases_matched),
