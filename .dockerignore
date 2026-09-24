@@ -1,0 +1,7 @@
+wsic
+data
+outputs
+**/__pycache__
+*.egg-info
+Dockerfile
+.dockerignore
