@@ -41,6 +41,69 @@ To sweep several washout windows:
 python scripts/run_pipeline_example.py --data-dir data --sweep 12 24 36 60 120
 ```
 
+## Reproduce with Docker
+
+The Docker image fixes the operating system, the Python version and every package
+version, so the worked example gives the same numbers on any machine. You need
+[Docker](https://docs.docker.com/get-docker/) installed and running.
+
+### Run the published image
+
+Windows (PowerShell):
+
+```powershell
+docker run --rm -v "${PWD}\outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.2.0
+```
+
+macOS or Linux:
+
+```bash
+docker run --rm -v "$(pwd)/outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.2.0
+```
+
+To pin the exact image, use its digest instead of the tag:
+
+```
+ghcr.io/ghannamzeinab/cohortlearn@sha256:18744072d20d7201bd5e0589177f6a77e68edf3ceb19dea2e873fee5aebd819d
+```
+
+### Or build the image from this repository
+
+```bash
+docker build -t cohortlearn:v0.2.0 .
+docker run --rm -v "$(pwd)/outputs:/app/outputs" cohortlearn:v0.2.0
+```
+
+On Windows, use `"${PWD}\outputs:/app/outputs"` for the mount.
+
+### What it runs
+
+The container generates the synthetic dataset (seed 42), builds the depression and
+no-depression cohorts, matches them, fits the Cox model and computes the E-values.
+The results are written to `outputs/`:
+
+| File                    | Content                                   |
+| ----------------------- | ----------------------------------------- |
+| `results_summary.txt`   | cohort sizes, balance, hazard ratio, E-values |
+| `love_plot.pdf`         | standardised mean differences             |
+| `ps_overlap.pdf`        | propensity-score overlap                  |
+| `matched_cohort_12m.csv`| the matched cohort                        |
+
+### Expected results
+
+| Metric                        | Value              |
+| ----------------------------- | ------------------ |
+| Cohort after matching         | 9,712 depression / 28,292 no depression |
+| Max \|SMD\| after matching    | 0.027              |
+| Events                        | 430                |
+| Hazard ratio (95% CI)         | 1.49 (1.23–1.81)   |
+| E-value (estimate / CI limit) | 2.35 / 1.76        |
+
+The console also prints two validation checks on separate synthetic datasets with a
+known hazard ratio. With a true HR of 1.65, the pipeline returns 1.68 (1.45–1.96).
+With a true HR of 1.00, it returns 1.10 (0.93–1.30). Both intervals contain the
+true value.
+
 ## Use as a library
 
 ```python
