@@ -14,7 +14,26 @@ person, as it is in real records, and the mechanical age gap disappears.
 
 Exposure still depends on the covariates, so real confounding remains. The outcome
 still depends on exposure with a known coefficient, so the true effect is known.
+
+Two outcome models are available.
+
+logistic (default)
+    Exposure changes the log-odds of ever having the outcome. The age at
+    outcome is drawn independently of exposure. The known effect is an odds
+    ratio. No true hazard ratio is defined, so a Cox estimate can only be
+    checked for direction.
+
+hazard
+    Outcome ages are drawn from a Gompertz proportional hazards model on the
+    age scale, with exposure as a time-varying covariate that switches on at
+    the exposure date (Bender et al. 2005; Austin 2012). The known effect is a
+    hazard ratio, so a Cox estimate can be checked against it directly.
+
+Only the outcome dates differ between the two models. Demographics, BMI,
+comorbidities, exposure and background codes are identical for the same seed.
 """
+
+import json
 
 import numpy as np
 import pandas as pd
@@ -38,6 +57,13 @@ AGE_AT_EXPOSURE_RANGE = (18.0, 90.0)
 
 AGE_AT_OUTCOME_MEAN = 76.0
 AGE_AT_OUTCOME_SD = 7.0
+
+# Gompertz baseline hazard for the hazard model, on the age scale from age 50.
+# The hazard doubles about every 5 years of age, as dementia incidence does.
+GOMPERTZ_START_AGE = 50.0
+GOMPERTZ_LAMBDA = 1.0e-4
+GOMPERTZ_GAMMA = np.log(2) / 5
+HAZARD_I10_LOG_HR = 0.20
 
 
 def make_demographics(n, seed=SEED, death_rate=0.12, first_id=FIRST_ID):
@@ -88,12 +114,48 @@ def _date_from_age(dob, age_years):
     return dob + pd.to_timedelta(np.asarray(age_years) * 365.25, unit="D")
 
 
+def _gompertz_inverse(y, lam, gam):
+    """Age at which the Gompertz cumulative baseline hazard reaches y."""
+    return GOMPERTZ_START_AGE + np.log1p(y * gam / lam) / gam
+
+
+def _gompertz_cumhaz(age, lam, gam):
+    """Cumulative Gompertz baseline hazard from GOMPERTZ_START_AGE to age."""
+    a = np.maximum(age - GOMPERTZ_START_AGE, 0.0)
+    return (lam / gam) * np.expm1(gam * a)
+
+
+def _hazard_outcome_ages(rng, age_exp, exposed, i10, log_hr,
+                         lam=GOMPERTZ_LAMBDA, gam=GOMPERTZ_GAMMA):
+    """Outcome ages from a Cox model with time-varying exposure.
+
+    Hazard at age a:  h0(a) * exp(b_i10 * I10 + log_hr * 1[a >= exposure age]).
+    Drawn by inverting the piecewise cumulative hazard (Austin 2012).
+    """
+    n = len(exposed)
+    c = np.exp(HAZARD_I10_LOG_HR * i10)
+    e = np.where(exposed, np.maximum(age_exp, GOMPERTZ_START_AGE), np.inf)
+    target = -np.log(rng.random(n))
+
+    h_e = np.where(np.isfinite(e), c * _gompertz_cumhaz(np.where(np.isfinite(e), e, 0.0),
+                                                        lam, gam), np.inf)
+    before = target < h_e
+    ages = np.empty(n)
+    ages[before] = _gompertz_inverse(target[before] / c[before], lam, gam)
+    after = ~before
+    g_e = _gompertz_cumhaz(e[after], lam, gam)
+    ages[after] = _gompertz_inverse(
+        g_e + (target[after] - h_e[after]) / (c[after] * np.exp(log_hr)), lam, gam)
+    return ages
+
+
 def make_icd10_long(demographics_df, BMI_df, n_dx=12, seed=SEED,
                     exposure_codes=("F32", "F33"),
                     outcome_codes=("G30", "F00"),
-                    true_log_hr=0.5,
+                    true_effect=0.5,
                     age_coef=-0.02,
-                    prevalent_frac=0.08):
+                    prevalent_frac=0.08,
+                    outcome_model="logistic"):
     """Long diagnosis table: id, code, date.
 
     Exposure probability is a logistic function of the participant's own
@@ -103,7 +165,12 @@ def make_icd10_long(demographics_df, BMI_df, n_dx=12, seed=SEED,
 
     Set age_coef to 0.0 to remove age from the exposure model. Age imbalance
     before matching is then sampling noise only.
+
+    true_effect is on the log scale of the chosen outcome model: log-odds for
+    outcome_model="logistic", log-hazard for outcome_model="hazard".
     """
+    if outcome_model not in ("logistic", "hazard"):
+        raise ValueError("outcome_model must be 'logistic' or 'hazard'")
     rng = np.random.default_rng(seed + 2)
     demo = demographics_df.set_index("id")
     bmi_s = BMI_df.set_index("id")["BMI"]
@@ -155,7 +222,7 @@ def make_icd10_long(demographics_df, BMI_df, n_dx=12, seed=SEED,
     lo_o = np.maximum(age_lo_win, 50.0)
     hi_o = np.maximum(np.minimum(age_hi_win, 100.0), lo_o + 0.5)
     age_out = _truncated_normal(rng, AGE_AT_OUTCOME_MEAN, AGE_AT_OUTCOME_SD, lo_o, hi_o)
-    o_logit = -3.6 + true_log_hr * exposed + 0.05 * (age_out - 76) + 0.20 * flags["I10"]
+    o_logit = -3.6 + true_effect * exposed + 0.05 * (age_out - 76) + 0.20 * flags["I10"]
     has_out = rng.random(n) < 1 / (1 + np.exp(-o_logit))
 
     out_date = pd.Series(pd.NaT, index=range(n), dtype="datetime64[ns]")
@@ -170,6 +237,19 @@ def make_icd10_long(demographics_df, BMI_df, n_dx=12, seed=SEED,
 
     inside_out = out_date.between(STUDY_START, STUDY_END).to_numpy()
     out_date[~inside_out] = pd.NaT
+
+    if outcome_model == "hazard":
+        # Separate random stream, so every other table matches the logistic run.
+        rng_h = np.random.default_rng(seed + 3)
+        age_h = _hazard_outcome_ages(rng_h, age_exp, exposed, flags["I10"], true_effect)
+        out_date = pd.Series(pd.NaT, index=range(n), dtype="datetime64[ns]")
+        ok = age_h <= 100.0
+        out_date[ok] = _date_from_age(dob[ok], age_h[ok])
+        dod = pd.to_datetime(demo["Date of Death"]).reset_index(drop=True)
+        after_death = dod.notna() & (out_date > dod)
+        out_date[after_death] = pd.NaT
+        inside_h = out_date.between(STUDY_START, STUDY_END).to_numpy()
+        out_date[~inside_h] = pd.NaT
 
     # ---- assemble the long table -----------------------------------------
     frames = []
@@ -223,6 +303,12 @@ if __name__ == "__main__":
     ap.add_argument("--age-coef", type=float, default=-0.02,
                     help="age coefficient in the exposure model, 0 to remove age")
     ap.add_argument("--seed", type=int, default=SEED)
+    ap.add_argument("--outcome-model", choices=["logistic", "hazard"],
+                    default="logistic",
+                    help="logistic: effect on odds of ever having the outcome; "
+                         "hazard: effect on the hazard (true HR known)")
+    ap.add_argument("--true-effect", type=float, default=0.5,
+                    help="exposure effect on the log scale of the outcome model")
     args = ap.parse_args()
 
     os.makedirs(args.out_dir, exist_ok=True)
@@ -231,10 +317,22 @@ if __name__ == "__main__":
     ids = demo["id"].to_numpy()
     bmi = make_bmi(ids, seed=args.seed)
     icd = make_icd10_long(demo, bmi, n_dx=args.n_dx, seed=args.seed,
-                          age_coef=args.age_coef)
+                          age_coef=args.age_coef, true_effect=args.true_effect,
+                          outcome_model=args.outcome_model)
 
     demo.to_csv(os.path.join(args.out_dir, "demographics.csv"), index=False)
     bmi.to_csv(os.path.join(args.out_dir, "bmi.csv"), index=False)
     icd.to_csv(os.path.join(args.out_dir, "icd10_long.csv"), index=False)
+
+    info = {
+        "outcome_model": args.outcome_model,
+        "true_effect_log": args.true_effect,
+        "true_effect": float(np.exp(args.true_effect)),
+        "effect_scale": "odds ratio" if args.outcome_model == "logistic" else "hazard ratio",
+        "n": args.n,
+        "seed": args.seed,
+    }
+    with open(os.path.join(args.out_dir, "generation_info.json"), "w") as f:
+        json.dump(info, f, indent=2)
 
     print(f"wrote {args.out_dir}/: {args.n:,} participants, {len(icd):,} diagnosis rows")

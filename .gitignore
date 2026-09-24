@@ -3,3 +3,4 @@ outputs*/
 wsic/
 .vscode/
 *.egg-info/
+checks/

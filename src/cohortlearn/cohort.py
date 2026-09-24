@@ -503,8 +503,12 @@ class CohortBuilder:
         """Risk-set (incidence-density) pseudo-index.
 
         For each candidate we work out the window in which they are a legitimate
-        control -- born, alive, in their record span, outcome-free, and not yet
-        exposed -- then draw a real case time zero that falls inside it. Age and
+        control -- born, alive, in their record span and not yet exposed -- then
+        draw a real case time zero that falls inside it. The window does not
+        end at the outcome date, because that would use future information
+        and shorten the eligible time of controls who later have the outcome.
+        Controls with the outcome on or before the drawn date are removed
+        afterwards as prevalent cases. Age and
         calendar era therefore come straight from the sampled date; no reference
         year is assumed anywhere.
         """
@@ -541,7 +545,6 @@ class CohortBuilder:
         hi_parts = pd.DataFrame({
             "death": ctrl["Date of Death"] if "Date of Death" in ctrl.columns else pd.Series(pd.NaT, index=ctrl.index),
             "pre_dep": ctrl["dep_onset"] - one_day,          # unexposed strictly before onset
-            "pre_dem": ctrl["dem_onset"] - one_day,          # outcome-free at time zero
             "obs_end": ctrl["obs_end"] if self.require_observation else pd.Series(pd.NaT, index=ctrl.index),
         }).apply(lambda s: pd.to_datetime(s).fillna(BIG))
         hi = hi_parts.min(axis=1)

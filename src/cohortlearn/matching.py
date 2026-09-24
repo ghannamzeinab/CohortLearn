@@ -283,8 +283,14 @@ class PSMCalculator:
                                  (axes[1], self.matched_cohort, "After matching")]:
             e = data.loc[data[self.treatment_col] == 1, "ps"].astype(float)
             c = data.loc[data[self.treatment_col] == 0, "ps"].astype(float)
-            ax.hist(e, bins=bins, range=(0, 1), density=True, alpha=0.5, color=c_exp, label="Exposed")
-            ax.hist(c, bins=bins, range=(0, 1), density=True, alpha=0.5, color=c_ctrl, label="Control")
+            edges = np.linspace(0, 1, bins + 1)
+            he, _ = np.histogram(e, bins=edges, density=True)
+            hc, _ = np.histogram(c, bins=edges, density=True)
+            x, w = edges[:-1], np.diff(edges)
+            ax.bar(x, he, w, align="edge", color=c_exp, linewidth=0, label="Exposed")
+            ax.bar(x, hc, w, align="edge", color=c_ctrl, linewidth=0, label="Control")
+            ax.bar(x, np.minimum(he, hc), w, align="edge", facecolor="#EDE7F0",
+                   edgecolor="#5B4A6B", hatch="///", linewidth=0.6, label="Shared")
             ax.set_title(title, fontsize=10)
             ax.set_xlabel("Propensity score")
         axes[0].set_ylabel("Density")
