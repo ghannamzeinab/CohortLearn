@@ -32,8 +32,8 @@ python scripts/run_pipeline_example.py --data-dir data --out-dir outputs
 ```
 
 The first command writes three CSV files to `data/`. The second builds the cohorts,
-matches, reports the diagnostics, fits the outcome model, and writes figures and the
-matched cohort to `outputs/`.
+matches, reports the diagnostics, fits the outcome model, and writes figures, the
+matched cohort and a results summary to `outputs/`.
 
 To sweep several washout windows:
 
@@ -44,7 +44,8 @@ python scripts/run_pipeline_example.py --data-dir data --sweep 12 24 36 60 120
 ## Reproduce with Docker
 
 The Docker image fixes the operating system, the Python version and every package
-version, so the worked example gives the same numbers on any machine. You need
+version. It also forces one generic CPU maths code path and a single thread, so the
+worked example gives the same numbers on different machines. You need
 [Docker](https://docs.docker.com/get-docker/) installed and running.
 
 ### Run the published image
@@ -52,26 +53,27 @@ version, so the worked example gives the same numbers on any machine. You need
 Windows (PowerShell):
 
 ```powershell
-docker run --rm -v "${PWD}\outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.2.0
+docker run --rm -v "${PWD}\outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.3.0
 ```
 
-macOS or Linux:
+Linux:
 
 ```bash
-docker run --rm -v "$(pwd)/outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.2.0
+docker run --rm -v "$(pwd)/outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.3.0
 ```
 
-To pin the exact image, use its digest instead of the tag:
+macOS:
 
+```bash
+docker run --rm --platform linux/amd64 -v "$(pwd)/outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.3.0
 ```
-ghcr.io/ghannamzeinab/cohortlearn@sha256:18744072d20d7201bd5e0589177f6a77e68edf3ceb19dea2e873fee5aebd819d
-```
+
 
 ### Or build the image from this repository
 
 ```bash
-docker build -t cohortlearn:v0.2.0 .
-docker run --rm -v "$(pwd)/outputs:/app/outputs" cohortlearn:v0.2.0
+docker build -t cohortlearn:v0.3.0 .
+docker run --rm -v "$(pwd)/outputs:/app/outputs" cohortlearn:v0.3.0
 ```
 
 On Windows, use `"${PWD}\outputs:/app/outputs"` for the mount.
@@ -82,26 +84,18 @@ The container generates the synthetic dataset (seed 42), builds the depression a
 no-depression cohorts, matches them, fits the Cox model and computes the E-values.
 The results are written to `outputs/`:
 
-| File                    | Content                                   |
-| ----------------------- | ----------------------------------------- |
-| `results_summary.txt`   | cohort sizes, balance, hazard ratio, E-values |
-| `love_plot.pdf`         | standardised mean differences             |
-| `ps_overlap.pdf`        | propensity-score overlap                  |
-| `matched_cohort_12m.csv`| the matched cohort                        |
+| File                     | Content                                        |
+| ------------------------ | ---------------------------------------------- |
+| `results_summary.txt`    | cohort sizes, balance, hazard ratio, E-values  |
+| `love_plot.pdf`          | standardised mean differences                  |
+| `ps_overlap.pdf`         | propensity-score overlap                       |
+| `matched_cohort_12m.csv` | the matched cohort                             |
 
-### Expected results
-
-| Metric                        | Value              |
-| ----------------------------- | ------------------ |
-| Cohort after matching         | 9,712 depression / 28,292 no depression |
-| Max \|SMD\| after matching    | 0.027              |
-| Events                        | 430                |
-| Hazard ratio (95% CI)         | 1.49 (1.23–1.81)   |
-| E-value (estimate / CI limit) | 2.35 / 1.76        |
+You should get a hazard ratio of 1.52 (95% CI 1.25–1.84), with 432 events.
 
 The console also prints two validation checks on separate synthetic datasets with a
 known hazard ratio. With a true HR of 1.65, the pipeline returns 1.68 (1.45–1.96).
-With a true HR of 1.00, it returns 1.10 (0.93–1.30). Both intervals contain the
+With a true HR of 1.00, it returns 1.12 (0.94–1.32). Both intervals contain the
 true value.
 
 ## Use as a library
@@ -178,6 +172,9 @@ scripts/
   generate_synthetic_data.py
   run_pipeline_example.py
 tests/               smoke tests
+run_all.py           worked example and validation checks, run by Docker
+Dockerfile           reproducible environment
+requirements.lock    pinned package versions
 data/                generated, not tracked
 outputs/             generated, not tracked
 ```
@@ -186,32 +183,45 @@ outputs/             generated, not tracked
 
 **Cohort construction.** Time zero for an exposed participant is their first exposure
 code. Time zero for an unexposed participant is drawn from the observed exposed time
-zeros, accepted only if that person is alive, under observation, outcome-free and
-unexposed on that date. Participants who are unexposed early and exposed later
-contribute their unexposed time and are censored at exposure onset. Prevalent
-outcomes are excluded, and a configurable washout window removes outcomes that were
-already developing at time zero.
+zeros, accepted only if that person is alive, under observation and unexposed on
+that date. Controls with the outcome on or before that date are then removed as
+prevalent cases. Participants who are unexposed early and exposed later contribute
+their unexposed time and are censored at exposure onset. A configurable washout
+window removes outcomes that were already developing at time zero.
 
-**Matching.** Propensity scores come from regularised logistic regression. Matching
-is greedy nearest neighbour on the logit score, without replacement, 1:k, inside
-exact strata for sex and a two-year index-period bucket, with a caliper of 0.2
-standard deviations.
+**Matching.** Propensity scores come from regularised logistic regression, fitted to
+tight convergence. Matching is greedy nearest neighbour on the logit score, without
+replacement, 1:k, inside exact strata for sex and a two-year index-period bucket,
+with a caliper of 0.2 standard deviations. Distances are compared on an exact
+integer grid with stable tie-breaking, so matches do not depend on floating-point
+rounding.
 
 **Validation.** Standardised mean differences before and after matching, a Love plot,
 propensity overlap plots, and a stratum composition table.
 
-**Outcome stage.** Cox regression with target-trial censoring, standard errors
-clustered on participant, a proportional hazards check, and E-values for unmeasured
-confounding.
+**Outcome stage.** Cox regression with target-trial censoring, optional standard
+errors clustered on participant, a proportional hazards check, and E-values for
+unmeasured confounding.
 
 ## Synthetic dataset
 
 `scripts/generate_synthetic_data.py` writes a synthetic dataset in the input format
 above. Exposure is generated from a logistic function of the covariates, so there is
-real confounding to remove. The outcome depends on exposure with a known
-coefficient, so the recovered estimate can be checked against the truth. Diagnosis
-dates are set from a drawn age at diagnosis rather than from a calendar window, so
-timing depends on the person. The generator is seeded.
+real confounding to remove. Diagnosis dates are set from a drawn age at diagnosis
+rather than from a calendar window, so timing depends on the person. The generator
+is seeded.
+
+Two outcome models are available through `--outcome-model`:
+
+- `logistic` (default) sets the exposure effect on the odds of ever having the
+  outcome. No true hazard ratio is defined, so the Cox estimate can be checked for
+  direction only. The worked example uses this model.
+- `hazard` draws outcome times from a proportional hazards model with time-varying
+  exposure, so the true hazard ratio is known and the Cox estimate can be checked
+  against it. The validation checks use this model.
+
+The size of the effect is set with `--true-effect`, on the log scale. Each run also
+writes `generation_info.json`, which records the true effect and its scale.
 
 ## Tests
 
