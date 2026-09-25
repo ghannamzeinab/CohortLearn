@@ -4,3 +4,7 @@ wsic/
 .vscode/
 *.egg-info/
 checks/
+test_env/
+test_env/
+.pytest_cache/
+__pycache__/

@@ -3,9 +3,11 @@
 Build matched exposed and unexposed cohorts from electronic health records, under
 the target trial emulation framework.
 
-Two problems get in the way of causal analysis on EHR data. Cohort construction is prone to design bias: follow-up that starts before eligibility is confirmed,
+Two problems get in the way of causal analysis on EHR data. Cohort construction is
+prone to design bias: follow-up that starts before eligibility is confirmed,
 eligibility decided using records that postdate time zero, or controls drawn from a
-different calendar period. Separately, many studies need to adjust for several confounders at once, and exact matching on all of them can leave strata empty.
+different calendar period. Separately, many studies need to adjust for several
+confounders at once, and exact matching on all of them can leave strata empty.
 
 CohortLearn addresses both. Time zero is aligned across arms, and controls are drawn
 by risk-set sampling using only pre-baseline records. The confounder set is then
@@ -14,89 +16,74 @@ collapsed to a single propensity score and matched.
 Nothing about the clinical question is fixed in the code. You supply the exposure,
 the outcome and the confounders as ICD code prefixes.
 
-## Install
+## Set up and run the library with synthetic data
 
-From the repository root:
+Download or clone this repository, then open a terminal in its folder. You can run
+the library with conda or with Docker.
 
-```bash
-pip install -e .
-```
+### Option A: Conda
 
-## Quick start
+You will need conda installed (find more information here:
+<https://conda-forge.org/download/>).
 
-```bash
-python scripts/generate_synthetic_data.py --n 60000 --out-dir data
-python scripts/run_pipeline_example.py --data-dir data --out-dir outputs
-```
-
-The first command writes three CSV files to `data/`. The second builds the cohorts,
-matches, reports the diagnostics, fits the outcome model, and writes figures, the
-matched cohort and a results summary to `outputs/`.
-
-To sweep several washout windows:
+Create the environment from the `environment.yml` file:
 
 ```bash
-python scripts/run_pipeline_example.py --data-dir data --sweep 12 24 36 60 120
+conda env create -f environment.yml
 ```
 
-## Reproduce with Docker
+Activate the environment:
 
-The Docker image fixes the operating system, the Python version and every package
-version. It also forces one generic CPU maths code path and a single thread, so the
-worked example gives the same numbers on different machines. You need
-[Docker](https://docs.docker.com/get-docker/) installed and running.
+```bash
+conda activate cohortlearn
+```
 
-### Run the published image
+Verify that the environment was installed correctly:
 
-Windows (PowerShell):
+```bash
+conda env list
+```
+
+Run the library on synthetic data:
+
+```bash
+python run_all.py
+```
+
+### Option B: Docker
+
+You will need Docker installed (find more information here:
+<https://docs.docker.com/get-started/get-docker/>).
+
+Run the published image. On Windows (PowerShell):
 
 ```powershell
 docker run --rm -v "${PWD}\outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.3.0
 ```
 
-Linux:
-
-```bash
-docker run --rm -v "$(pwd)/outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.3.0
-```
-
-macOS:
+On macOS or Linux:
 
 ```bash
 docker run --rm --platform linux/amd64 -v "$(pwd)/outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.3.0
 ```
 
+### Results
 
-### Or build the image from this repository
-
-```bash
-docker build -t cohortlearn:v0.3.0 .
-docker run --rm -v "$(pwd)/outputs:/app/outputs" cohortlearn:v0.3.0
-```
-
-On Windows, use `"${PWD}\outputs:/app/outputs"` for the mount.
-
-### What it runs
-
-The container generates the synthetic dataset (seed 42), builds the depression and
-no-depression cohorts, matches them, fits the Cox model and computes the E-values.
-The results are written to `outputs/`:
-
-| File                     | Content                                        |
-| ------------------------ | ---------------------------------------------- |
-| `results_summary.txt`    | cohort sizes, balance, hazard ratio, E-values  |
-| `love_plot.pdf`          | standardised mean differences                  |
-| `ps_overlap.pdf`         | propensity-score overlap                       |
-| `matched_cohort_12m.csv` | the matched cohort                             |
-
-You should get a hazard ratio of 1.52 (95% CI 1.25–1.84), with 432 events.
-
-The console also prints two validation checks on separate synthetic datasets with a
-known hazard ratio. With a true HR of 1.65, the pipeline returns 1.68 (1.45–1.96).
-With a true HR of 1.00, it returns 1.12 (0.94–1.32). Both intervals contain the
-true value.
+The results are written to `outputs/`: a results summary, a Love plot, a
+propensity-score overlap plot and the matched cohort. With Docker, the hazard ratio
+is 1.52 (95% CI 1.25–1.84). With conda, the last digits can differ between
+operating systems, but the conclusion is the same.
 
 ## Use as a library
+
+To use CohortLearn in your own analysis, install it into your environment from the
+repository folder:
+
+```bash
+pip install -e .
+```
+
+The conda environment above already includes it. Then:
 
 ```python
 from cohortlearn import CohortBuilder, PSMCalculator, SurvivalAnalyser
@@ -144,6 +131,19 @@ sa.summary(exposure_only=True)
 sa.e_value()
 ```
 
+The scripts can also be run one at a time:
+
+```bash
+python scripts/generate_synthetic_data.py --n 60000 --out-dir data
+python scripts/run_pipeline_example.py --data-dir data --out-dir outputs
+```
+
+To sweep several washout windows:
+
+```bash
+python scripts/run_pipeline_example.py --data-dir data --sweep 12 24 36 60 120
+```
+
 ## Input format
 
 Flat tables. No common data model required.
@@ -170,8 +170,9 @@ scripts/
   generate_synthetic_data.py
   run_pipeline_example.py
 tests/               smoke tests
-run_all.py           worked example and validation checks, run by Docker
-Dockerfile           reproducible environment
+run_all.py           worked example and validation checks
+environment.yml      conda environment
+Dockerfile           Docker environment
 requirements.lock    pinned package versions
 data/                generated, not tracked
 outputs/             generated, not tracked
@@ -223,8 +224,10 @@ writes `generation_info.json`, which records the true effect and its scale.
 
 ## Tests
 
+With the conda environment active, run:
+
 ```bash
-pip install -e ".[dev]"
+pip install pytest
 pytest -q
 ```
 

@@ -1,0 +1,10 @@
+name: cohortlearn
+channels:
+  - conda-forge
+  - nodefaults
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - -r requirements.lock
+      - -e .

@@ -1,8 +1,0 @@
-numpy>=1.22
-pandas>=1.5
-scikit-learn>=1.1
-matplotlib>=3.5
-lifelines>=0.27
-
-[dev]
-pytest>=7.0
