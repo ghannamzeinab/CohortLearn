@@ -6,8 +6,7 @@ the target trial emulation framework.
 Two problems get in the way of causal analysis on EHR data. Cohorts assembled by
 hand pick up design bias: follow-up that starts before eligibility is confirmed,
 eligibility decided using records that postdate time zero, or controls drawn from a
-different calendar period. Separately, realistic studies need many confounders at
-once, and exact matching on all of them leaves the strata empty.
+different calendar period. Separately, many studies need to adjust for several confounders at once, and exact matching on all of them can leave strata empty.
 
 CohortLearn addresses both. Time zero is aligned across arms, and controls are drawn
 by risk-set sampling using only pre-baseline records. The confounder set is then
