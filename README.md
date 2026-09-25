@@ -3,8 +3,7 @@
 Build matched exposed and unexposed cohorts from electronic health records, under
 the target trial emulation framework.
 
-Two problems get in the way of causal analysis on EHR data. Cohorts assembled by
-hand pick up design bias: follow-up that starts before eligibility is confirmed,
+Two problems get in the way of causal analysis on EHR data. Cohort construction is prone to design bias: follow-up that starts before eligibility is confirmed,
 eligibility decided using records that postdate time zero, or controls drawn from a
 different calendar period. Separately, many studies need to adjust for several confounders at once, and exact matching on all of them can leave strata empty.
 
