@@ -38,6 +38,7 @@ CONF = {
         "bmi": True,
         "education": True,
         "risk_allele": False,
+        "lookback": True,       # years of records before time zero, in the PS model
     },
     "age_range": (18, 110),
 }
@@ -64,10 +65,12 @@ def load_inputs(data_dir):
     return icd, demo, bmi
 
 
-def build_and_match(icd, demo, bmi, washout_months, ratio=3, caliper_sd=0.2, seed=42):
+def build_and_match(icd, demo, bmi, washout_months, ratio=3, caliper_sd=0.2, seed=42,
+                    min_lookback_years=2.0):
     """Build both arms for one washout window, then match."""
     builder = CohortBuilder(washout_months=washout_months,
-                            require_observation=True, **CONF)
+                            require_observation=True,
+                            min_lookback_years=min_lookback_years, **CONF)
     builder.attach_dataframes(icd10_long=icd, demographics=demo, bmi=bmi)
 
     cases = builder.build_case_cohort()
@@ -104,8 +107,11 @@ def _prevalence(icd, demo, codes):
     return hit / demo["id"].nunique()
 
 
-def write_results_summary(path, args, icd, demo, psm, sa, e_val):
-    """Write a short, readable summary of the main analysis."""
+def write_results_summary(path, args, icd, demo, psm, sa, e_val, lb):
+    """Write a short, readable summary of the main analysis.
+
+    lb : mean look-back per arm in the matched cohort, from lookback_report().
+    """
     import numpy as np
 
     d = sa.data
@@ -163,12 +169,13 @@ def write_results_summary(path, args, icd, demo, psm, sa, e_val):
         "3. Design",
         line,
         f"Washout            : {args.washout_months} months",
+        f"Minimum look-back  : {args.min_lookback_years:g} years",
         f"Matching           : 1:{args.ratio} nearest neighbour on logit PS,",
         "                     caliper 0.2 SD, exact on sex, age band",
         "                     and 2-year calendar period",
     ]
     conf = ", ".join(c.replace("_", " ") for c in CONF["confounder_codes"])
-    conf += ", age, sex, BMI, education"
+    conf += ", age, sex, BMI, education, look-back"
     wrapped = textwrap.wrap(conf, 43)
     out += ["Confounders        : " + wrapped[0]]
     out += [" " * 21 + w for w in wrapped[1:]]
@@ -180,6 +187,8 @@ def write_results_summary(path, args, icd, demo, psm, sa, e_val):
         f"No depression : {nc:,}",
         f"Max |SMD| after matching : {bal['SMD_post'].abs().max():.3f}"
         + ("  (balanced, < 0.1)" if bal['SMD_post'].abs().max() < 0.1 else ""),
+        f"Mean look-back, years    : {lb['exposed']:.2f} exposed, "
+        f"{lb['unexposed']:.2f} unexposed",
         "",
         "5. Follow-up",
         line,
@@ -223,6 +232,8 @@ def main():
     parser.add_argument("--out-dir", default="outputs",
                         help="directory for matched cohorts and figures")
     parser.add_argument("--washout-months", type=int, default=12)
+    parser.add_argument("--min-lookback-years", type=float, default=2.0,
+                        help="minimum years of records before time zero, both arms")
     parser.add_argument("--ratio", type=int, default=3)
     parser.add_argument("--study-end", default="2024-12-31")
     parser.add_argument("--seed", type=int, default=42)
@@ -235,14 +246,18 @@ def main():
 
     print("\n=== cohort construction and matching ===")
     builder, psm = build_and_match(icd, demo, bmi, args.washout_months,
-                                   ratio=args.ratio, seed=args.seed)
+                                   ratio=args.ratio, seed=args.seed,
+                                   min_lookback_years=args.min_lookback_years)
     matched = psm.matched_cohort
 
     print("\n=== participant flow ===")
     builder.consort.summary()
 
-    print("\n=== look-back symmetry ===")
+    print("\n=== look-back symmetry, before matching ===")
     builder.lookback_report(builder.cases, builder.controls)
+    print("\n=== look-back symmetry, after matching ===")
+    lb_matched = builder.lookback_report(matched[matched["is_exposed"] == 1],
+                                         matched[matched["is_exposed"] == 0])
     print("\n=== balance ===")
     psm.balance_table()
     psm.plot_overlap(save_path=os.path.join(args.out_dir, "ps_overlap.pdf"))
@@ -272,14 +287,15 @@ def main():
     print(f"\nsaved {path}")
 
     write_results_summary(os.path.join(args.out_dir, "results_summary.txt"),
-                          args, icd, demo, psm, sa, e_val)
+                          args, icd, demo, psm, sa, e_val, lb_matched)
 
     if args.sweep:
         print("\n=== washout sweep ===")
         rows = []
         for w in args.sweep:
             b_w, psm_w = build_and_match(icd, demo, bmi, w,
-                                         ratio=args.ratio, seed=args.seed)
+                                         ratio=args.ratio, seed=args.seed,
+                                         min_lookback_years=args.min_lookback_years)
             s = SurvivalAnalyser(psm_w.matched_cohort, study_end=args.study_end,
                                  covariates=keep)
             s.prepare()

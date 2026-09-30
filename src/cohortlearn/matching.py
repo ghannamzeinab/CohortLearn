@@ -11,7 +11,7 @@ from sklearn.linear_model import LogisticRegression
 class PSMCalculator:
     PRE_PREFIX = "pre_"
     EDU_PREFIX = "edu_"
-    DEFAULT_CONTINUOUS = ["age_at_index", "BMI"]
+    DEFAULT_CONTINUOUS = ["age_at_index", "BMI", "lookback_years"]
     DEFAULT_EXACT = ["Sex"]
     STRATUM_SEP = "||"
     PS_GRID = 1e-4          # matching resolution on the logit scale
@@ -22,6 +22,8 @@ class PSMCalculator:
                   "Obese I (30-34.9)", "Obese II (35-39.9)", "Obese III (>=40)"]
     AGE_BINS = [18, 40, 50, 60, 70, 80, np.inf]
     AGE_LABELS = ["18-39", "40-49", "50-59", "60-69", "70-79", "80+"]
+    LOOKBACK_BINS = [0, 2, 5, 10, np.inf]
+    LOOKBACK_LABELS = ["<2", "2-4.9", "5-9.9", "10+"]
 
     def __init__(self, master, treatment_col="is_exposed",
                  numeric_cols=None, categorical_cols=None, exact_match_cols=None,
@@ -215,7 +217,7 @@ class PSMCalculator:
         t = df[df[self.treatment_col] == 1]
         c = df[df[self.treatment_col] == 0]
         rows = []
-        for col in ["age_at_index", "BMI"]:
+        for col in self.DEFAULT_CONTINUOUS:
             if col in df.columns:
                 tv, cv = pd.to_numeric(t[col], errors="coerce"), pd.to_numeric(c[col], errors="coerce")
                 vr = cv.var(ddof=1) / tv.var(ddof=1) if tv.var(ddof=1) else np.nan
@@ -318,6 +320,10 @@ class PSMCalculator:
         if "BMI" in out.columns:
             out["_bmi_band"] = pd.cut(pd.to_numeric(out["BMI"], errors="coerce"),
                                       bins=self.BMI_BINS, labels=self.BMI_LABELS, right=False)
+        if "lookback_years" in out.columns:
+            out["_lookback_band"] = pd.cut(pd.to_numeric(out["lookback_years"], errors="coerce"),
+                                           bins=self.LOOKBACK_BINS, labels=self.LOOKBACK_LABELS,
+                                           right=False)
         return out
 
     def strata_table(self, verbose=True):
@@ -343,6 +349,10 @@ class PSMCalculator:
         if "_bmi_band" in df.columns:
             for lvl in self.BMI_LABELS:
                 pct(df, e["_bmi_band"] == lvl, c["_bmi_band"] == lvl, "BMI (WHO)", lvl)
+        if "_lookback_band" in df.columns:
+            for lvl in self.LOOKBACK_LABELS:
+                pct(df, e["_lookback_band"] == lvl, c["_lookback_band"] == lvl,
+                    "Look-back (years)", lvl)
         for col in sorted(x for x in df.columns if x.startswith("edu_")):
             pct(df, e[col] == 1, c[col] == 1, "Education", col.replace("edu_", "level "))
         for col in sorted(x for x in df.columns if x.startswith("pre_")):

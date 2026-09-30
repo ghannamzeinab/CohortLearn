@@ -89,7 +89,8 @@ class SurvivalAnalyser:
     # ---------- model ----------
 
     def _auto_covariates(self):
-        cols = [c for c in ["age_at_index", "BMI", "Sex"] if c in self.data.columns]
+        cols = [c for c in ["age_at_index", "BMI", "lookback_years", "Sex"]
+                if c in self.data.columns]
         cols += sorted(c for c in self.data.columns if c.startswith("pre_"))
         cols += sorted(c for c in self.data.columns if c.startswith("edu_"))
         return cols

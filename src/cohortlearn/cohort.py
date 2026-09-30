@@ -77,6 +77,10 @@ class CohortBuilder:
     free of the outcome, and not yet exposed. People who become exposed
     later still contribute this earlier unexposed time and are flagged so
     the survival stage can censor them at exposure onset.
+
+    Both arms can be required to have a minimum look-back, i.e. a minimum
+    span of records before time zero. The look-back length can also enter
+    the propensity model, so that matched arms have similar record history.
     """
 
     EDUCATION_CODES = [-1, 0, 1, 2, 3]  # fallback if auto-discovery finds nothing
@@ -94,7 +98,8 @@ class CohortBuilder:
                  education_codes: Optional[List[int]] = None,
                  age_range: Optional[Tuple[float, float]] = None,
                  washout_months: int = 12,
-                 require_observation: bool = True):
+                 require_observation: bool = True,
+                 min_lookback_years: float = 0.0):
         """
         exposure_codes / outcome_codes : ICD-10 prefixes, e.g. ['F32','F33'] / ['G30'].
         confounder_codes : {name: [prefixes]} -> one binary pre_<name> per group.
@@ -103,6 +108,12 @@ class CohortBuilder:
         washout_months : drop anyone whose outcome lands in (time_zero, time_zero+N months].
         require_observation : only place a pseudo-index inside a control's own
             record span (first..last coded date) so time zero has data coverage.
+        min_lookback_years : minimum years of records (first coded date to time
+            zero) required in both arms. 0 switches the criterion off. For the
+            unexposed arm it is applied inside the sampling window, so no control
+            is ever given an ineligible time zero.
+        demographic_confounders['lookback'] : if True, a lookback_years column is
+            added to both arms and used as a propensity-model covariate.
         """
         self.icd10_path = icd10_path
         self.demographics_path = demographics_path
@@ -129,6 +140,9 @@ class CohortBuilder:
         self.age_range = age_range or (0, 120)
         self.washout_months = washout_months
         self.require_observation = require_observation
+        if not (np.isscalar(min_lookback_years) and min_lookback_years >= 0):
+            raise ValueError(f"min_lookback_years must be >= 0, got {min_lookback_years!r}.")
+        self.min_lookback_years = float(min_lookback_years)
 
         self.icd10 = self.demographics = self.bmi = self.risk_allele = None
         self.icd10_long = None
@@ -297,6 +311,18 @@ class CohortBuilder:
         yob = pd.to_numeric(series, errors="coerce")
         return pd.to_datetime(pd.DataFrame({"year": yob, "month": 7, "day": 1}), errors="coerce")
 
+    def _lookback_delta(self):
+        """Minimum look-back as a time span."""
+        return pd.Timedelta(days=round(self.min_lookback_years * 365.25))
+
+    def _obs_start(self):
+        """First coded date per participant, i.e. the start of their records."""
+        return (self.icd10_long.groupby("id")["date"].min()
+                    .rename("obs_start").reset_index())
+
+    def _use_lookback_covariate(self):
+        return bool(self.demographic_confounders.get("lookback", False))
+
     def compute_pre_features(self, id_anchor_df, confounder_codes):
         """Binary pre_<name> flags for comorbidities coded strictly before time zero."""
         anchor = id_anchor_df[["id", "index_date"]].copy()
@@ -381,6 +407,16 @@ class CohortBuilder:
                       .rename(columns={"date": "index_date", "code": "exposure_code"})
                       [["id", "index_date", "exposure_code"]])
         self.consort.log("exposed_individuals", len(idx))
+
+        # Look-back: years of records before time zero. Eligibility is decided
+        # at time zero, so the criterion uses only records up to that date.
+        idx = idx.merge(self._obs_start(), on="id", how="left")
+        idx["lookback_years"] = (idx["index_date"] - idx["obs_start"]).dt.days / 365.25
+        if self.min_lookback_years > 0:
+            short = (idx["index_date"] - idx["obs_start"]) < self._lookback_delta()
+            self.consort.log("excluded_short_lookback", int(short.sum()))
+            idx = idx[~short].copy()
+        idx = idx.drop(columns=["obs_start"])
         idx["first_outcome_date"] = pd.NaT
 
         if self.outcome_codes:
@@ -401,7 +437,10 @@ class CohortBuilder:
 
         self.consort.log("after_outcome_exclusions", len(idx))
         cohort = idx.merge(self.demographics, on="id", how="left")
-        cohort = self._add_demographic_features(cohort, preserve_cols=["exposure_code", "first_outcome_date"])
+        keep_cols = ["exposure_code", "first_outcome_date"]
+        if self._use_lookback_covariate():
+            keep_cols.append("lookback_years")
+        cohort = self._add_demographic_features(cohort, preserve_cols=keep_cols)
         
         if "Date of Death" in cohort.columns:
             death = pd.to_datetime(cohort["Date of Death"])
@@ -472,8 +511,10 @@ class CohortBuilder:
         if "first_outcome_date" not in controls.columns:
             controls["first_outcome_date"] = pd.NaT
 
-        controls = self._add_demographic_features(
-            controls, preserve_cols=["first_outcome_date", "exposure_onset_date"])
+        keep_cols = ["first_outcome_date", "exposure_onset_date"]
+        if self._use_lookback_covariate():
+            keep_cols.append("lookback_years")
+        controls = self._add_demographic_features(controls, preserve_cols=keep_cols)
 
         if "age_at_index" in controls.columns:
             n0 = len(controls)
@@ -528,19 +569,23 @@ class CohortBuilder:
             else pd.DataFrame(columns=["id", "dem_onset"])
         ctrl = ctrl.merge(dem, on="id", how="left")
 
-        if self.require_observation:
-            span = (self.icd10_long.groupby("id")["date"].agg(["min", "max"])
-                        .rename(columns={"min": "obs_start", "max": "obs_end"}).reset_index())
-            ctrl = ctrl.merge(span, on="id", how="left")
-        else:
-            ctrl["obs_start"], ctrl["obs_end"] = pd.NaT, pd.NaT
+        # The record span is always needed for the look-back; obs_end only
+        # bounds the window when require_observation is True.
+        span = (self.icd10_long.groupby("id")["date"].agg(["min", "max"])
+                    .rename(columns={"min": "obs_start", "max": "obs_end"}).reset_index())
+        ctrl = ctrl.merge(span, on="id", how="left")
 
         BIG = pd.Timestamp.max.normalize()
         one_day = pd.Timedelta(days=1)
 
-        lo = ctrl["date_of_birth"]
+        lo_base = ctrl["date_of_birth"]
         if self.require_observation:
-            lo = pd.concat([lo, ctrl["obs_start"]], axis=1).max(axis=1)
+            lo_base = pd.concat([lo_base, ctrl["obs_start"]], axis=1).max(axis=1)
+        lo = lo_base
+        if self.min_lookback_years > 0:
+            # The window opens only once the minimum look-back has accrued.
+            lo = pd.concat([lo_base, ctrl["obs_start"] + self._lookback_delta()],
+                           axis=1).max(axis=1)
 
         hi_parts = pd.DataFrame({
             "death": ctrl["Date of Death"] if "Date of Death" in ctrl.columns else pd.Series(pd.NaT, index=ctrl.index),
@@ -550,6 +595,7 @@ class CohortBuilder:
         hi = hi_parts.min(axis=1)
 
         exposure_onset = ctrl["dep_onset"]                    # NaT unless they become exposed later
+        valid_base = lo_base.notna() & (hi >= lo_base)
         valid = lo.notna() & (hi >= lo)
 
         cases = case_cohort[["Sex", "index_date"]].dropna().copy()
@@ -583,12 +629,16 @@ class CohortBuilder:
             leftover = _draw(by_sex.get(s), rows)          # same-sex first
             _draw(all_dates, leftover)                     # fall back to all cases
         
-        self.consort.log("controls_no_eligible_window", int((~valid.values).sum()))
+        self.consort.log("controls_no_eligible_window", int((~valid_base.values).sum()))
+        if self.min_lookback_years > 0:
+            self.consort.log("controls_excluded_short_lookback",
+                             int((valid_base.values & ~valid.values).sum()))
         self.consort.log("controls_no_valid_riskset_date", int((valid.values & ~assigned).sum()))
 
         ctrl["index_date"] = pd.NaT
         ctrl.loc[assigned, "index_date"] = chosen[assigned].view("datetime64[ns]")
         ctrl["exposure_onset_date"] = pd.to_datetime(exposure_onset)
+        ctrl["lookback_years"] = (pd.to_datetime(ctrl["index_date"]) - ctrl["obs_start"]).dt.days / 365.25
         ctrl = ctrl.drop(columns=["dep_onset", "dem_onset", "obs_start", "obs_end"], errors="ignore")
         return ctrl
 
@@ -602,15 +652,18 @@ class CohortBuilder:
             years = (merged["index_date"] - merged["obs_start"]).dt.days / 365.25
             means[name] = years.mean()
             print(f"  {name:<10} look-back years  mean {years.mean():6.2f}  "
-                  f"median {years.median():6.2f}  10th pct {years.quantile(.10):6.2f}")
+                  f"median {years.median():6.2f}  10th pct {years.quantile(.10):6.2f}  "
+                  f"min {years.min():6.2f}")
         gap = means["exposed"] - means["unexposed"]
         print(f"  difference in mean look-back: {gap:+.2f} years")
         if abs(gap) > tolerance_years:
             warnings.warn(
                 f"Mean look-back differs by {gap:+.2f} years between arms. Every "
                 f"pre_<name> confounder is measured over a different window, so "
-                f"the arms are differentially ascertained and matching cannot "
-                f"correct it. Consider requiring a common minimum look-back.",
+                f"the arms are differentially ascertained. Set min_lookback_years, "
+                f"add look-back to the propensity model "
+                f"(demographic_confounders['lookback']=True), and rerun this "
+                f"report on the matched cohort.",
                 UserWarning, stacklevel=2)
         self.lookback_ = means
         return means

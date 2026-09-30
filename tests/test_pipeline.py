@@ -113,3 +113,53 @@ def test_e_value_at_least_one(matched):
     sa.fit(adjusted=False, cluster=False)
     ev = sa.e_value(verbose=False)
     assert ev["E_value_estimate"] >= 1.0
+
+
+# ---------- minimum look-back ----------
+
+LOOKBACK_CONF = {**CONF, "demographic_confounders": {**CONF["demographic_confounders"],
+                                                     "lookback": True}}
+
+
+@pytest.fixture(scope="module")
+def lookback_run(inputs):
+    icd, demo, bmi = inputs
+    b = CohortBuilder(washout_months=12, require_observation=True,
+                      min_lookback_years=8, **LOOKBACK_CONF)
+    b.attach_dataframes(icd10_long=icd, demographics=demo, bmi=bmi)
+    cases = b.build_case_cohort()
+    controls = b.build_control_cohort(cases)
+    master = b.build_master_df(cases, controls)
+    psm = PSMCalculator(master, exact_match_cols=["Sex"], ratio=3, consort=b.consort)
+    psm.fit()
+    psm.match()
+    return b, psm, cases, controls
+
+
+def _lookback(builder, arm):
+    start = builder.icd10_long.groupby("id")["date"].min()
+    return (arm["index_date"] - arm["id"].map(start)).dt.days / 365.25
+
+
+def test_min_lookback_both_arms(lookback_run):
+    b, _, cases, controls = lookback_run
+    assert (_lookback(b, cases) >= 8 - 1e-9).all()
+    assert (_lookback(b, controls) >= 8 - 1e-9).all()
+
+
+def test_min_lookback_logged(lookback_run):
+    b, _, _, _ = lookback_run
+    assert b.consort.get("excluded_short_lookback") > 0
+    assert "controls_excluded_short_lookback" in b.consort._data
+
+
+def test_lookback_in_propensity_model(lookback_run):
+    _, psm, _, _ = lookback_run
+    assert "lookback_years" in psm.numeric_cols
+    tbl = psm.balance_table(verbose=False)
+    assert "lookback_years" in set(tbl["covariate"])
+
+
+def test_negative_min_lookback_rejected():
+    with pytest.raises(ValueError):
+        CohortBuilder(min_lookback_years=-1, **CONF)
