@@ -31,6 +31,10 @@ hazard
 
 Only the outcome dates differ between the two models. Demographics, BMI,
 comorbidities, exposure and background codes are identical for the same seed.
+
+Records stop at death. An exposure drawn after the date of death is removed
+before the outcome is generated, so both outcome models use the exposure the
+person actually had. Every other code dated after death is then dropped.
 """
 
 import json
@@ -218,6 +222,16 @@ def make_icd10_long(demographics_df, BMI_df, n_dx=12, seed=SEED,
     exp_date[~inside] = pd.NaT
     exposed = inside
 
+    # ---- death ends the record -------------------------------------------
+    # A person cannot be diagnosed after death. An exposure drawn after the
+    # date of death is removed here, before the outcome is generated, so the
+    # outcome models see the exposure the person actually had. No random
+    # numbers are drawn, so every later draw is unchanged for the same seed.
+    dod = pd.to_datetime(demo["Date of Death"]).reset_index(drop=True)
+    exposed_after_death = exposed & (dod.notna() & (exp_date > dod)).to_numpy()
+    exp_date[exposed_after_death] = pd.NaT
+    exposed = exposed & ~exposed_after_death
+
     # ---- outcome model: depends on exposure and age ----------------------
     lo_o = np.maximum(age_lo_win, 50.0)
     hi_o = np.maximum(np.minimum(age_hi_win, 100.0), lo_o + 0.5)
@@ -245,7 +259,6 @@ def make_icd10_long(demographics_df, BMI_df, n_dx=12, seed=SEED,
         out_date = pd.Series(pd.NaT, index=range(n), dtype="datetime64[ns]")
         ok = age_h <= 100.0
         out_date[ok] = _date_from_age(dob[ok], age_h[ok])
-        dod = pd.to_datetime(demo["Date of Death"]).reset_index(drop=True)
         after_death = dod.notna() & (out_date > dod)
         out_date[after_death] = pd.NaT
         inside_h = out_date.between(STUDY_START, STUDY_END).to_numpy()
@@ -287,7 +300,13 @@ def make_icd10_long(demographics_df, BMI_df, n_dx=12, seed=SEED,
                 .sort_values(["id", "date"], kind="mergesort")
                 .reset_index(drop=True))
 
-    print(f"exposure prevalence {em.mean():.1%} | outcome prevalence {om.mean():.1%}")
+    # records stop at death: drop every code dated after the date of death
+    death_by_id = pd.Series(dod.to_numpy(), index=ids)
+    d = rows["id"].map(death_by_id)
+    rows = rows[~(d.notna() & (rows["date"] > d))].reset_index(drop=True)
+
+    out_ids = rows.loc[rows["code"].str.startswith(tuple(outcome_codes)), "id"].nunique()
+    print(f"exposure prevalence {em.mean():.1%} | outcome prevalence {out_ids / n:.1%}")
     return rows
 
 
