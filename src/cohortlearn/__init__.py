@@ -11,7 +11,7 @@ from .cohort import CohortBuilder, CONSORTTracker, rename_id
 from .matching import PSMCalculator
 from .survival import SurvivalAnalyser, full_rank_covariates
 
-__version__ = "0.1.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "CohortBuilder",

@@ -58,20 +58,20 @@ You will need Docker installed (find more information here:
 Run the published image. On Windows (PowerShell):
 
 ```powershell
-docker run --rm -v "${PWD}\outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.3.0
+docker run --rm -v "${PWD}\outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.4.0
 ```
 
 On macOS or Linux:
 
 ```bash
-docker run --rm --platform linux/amd64 -v "$(pwd)/outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.3.0
+docker run --rm --platform linux/amd64 -v "$(pwd)/outputs:/app/outputs" ghcr.io/ghannamzeinab/cohortlearn:v0.4.0
 ```
 
 ### Results
 
-The results are written to `outputs/`: a results summary, a Love plot, a
-propensity-score overlap plot and the matched cohort. With Docker, the hazard ratio
-is 1.52 (95% CI 1.25–1.84). With conda, the last digits can differ between
+The results are written to `outputs/`: a results summary, a Love plot (full and
+short), a propensity-score overlap plot and the matched cohort. With Docker, the
+hazard ratio is 1.91 (95% CI 1.54–2.38). With conda, the last digits can differ between
 operating systems, but the conclusion is the same.
 
 ## Use as a library
@@ -97,11 +97,13 @@ CONF = {
         "anxiety":      ["F40", "F41"],
     },
     "demographic_confounders": {"age": True, "sex": True, "bmi": True,
-                                "education": True, "risk_allele": False},
+                                "education": True, "risk_allele": False,
+                                "lookback": True},
     "age_range": (18, 110),
 }
 
-builder = CohortBuilder(washout_months=12, require_observation=True, **CONF)
+builder = CohortBuilder(washout_months=12, require_observation=True,
+                        min_lookback_years=2, **CONF)
 builder.attach_dataframes(icd10_long=icd10_long_df,
                           demographics=demographics_df,
                           bmi=bmi_df)
@@ -117,6 +119,7 @@ psm.match()
 
 psm.balance_table()
 psm.plot_smd()
+psm.plot_smd(only_imbalanced=True)
 psm.plot_overlap()
 psm.strata_table()
 
@@ -186,7 +189,9 @@ zeros, accepted only if that person is alive, under observation and unexposed on
 that date. Controls with the outcome on or before that date are then removed as
 prevalent cases. Participants who are unexposed early and exposed later contribute
 their unexposed time and are censored at exposure onset. A configurable washout
-window removes outcomes that were already developing at time zero.
+window removes outcomes that were already developing at time zero. An optional
+minimum look-back requires both arms to have enough record history before time
+zero, and look-back length can enter the propensity model.
 
 **Matching.** Propensity scores come from regularised logistic regression, fitted to
 tight convergence. Matching is greedy nearest neighbour on the logit score, without
@@ -195,8 +200,9 @@ with a caliper of 0.2 standard deviations. Distances are compared on an exact
 integer grid with stable tie-breaking, so matches do not depend on floating-point
 rounding.
 
-**Validation.** Standardised mean differences before and after matching, a Love plot,
-propensity overlap plots, and a stratum composition table.
+**Validation.** Standardised mean differences and variance ratios before and after
+matching, a Love plot (full and short), propensity overlap plots, a stratum
+composition table, and a look-back report comparing record history between arms.
 
 **Outcome stage.** Cox regression with target-trial censoring, optional standard
 errors clustered on participant, a proportional hazards check, and E-values for
@@ -207,8 +213,8 @@ unmeasured confounding.
 `scripts/generate_synthetic_data.py` writes a synthetic dataset in the input format
 above. Exposure is generated from a logistic function of the covariates, so there is
 real confounding to remove. Diagnosis dates are set from a drawn age at diagnosis
-rather than from a calendar window, so timing depends on the person. The generator
-is seeded.
+rather than from a calendar window, so timing depends on the person. Records stop
+at death, so no code is dated after a participant's death. The generator is seeded.
 
 Two outcome models are available through `--outcome-model`:
 
@@ -221,6 +227,9 @@ Two outcome models are available through `--outcome-model`:
 
 The size of the effect is set with `--true-effect`, on the log scale. Each run also
 writes `generation_info.json`, which records the true effect and its scale.
+
+The synthetic dataset and the worked-example matched cohort are archived on Zenodo
+(version 2.0.0): <https://doi.org/10.5281/zenodo.23072614>.
 
 ## Tests
 
