@@ -371,8 +371,13 @@ class PSMCalculator:
     # --------------------------------------
 #    plot the SMD
 
-    def plot_smd(self, threshold=0.1, save_path=None):
-        """Love plot: |SMD| per covariate, before vs after matching."""
+    def plot_smd(self, threshold=0.1, save_path=None, only_imbalanced=False):
+        """Love plot: |SMD| per covariate, before vs after matching.
+
+        only_imbalanced : if True, plot only the covariates whose |SMD| before
+            matching exceeds the threshold. This gives a short plot for the main
+            text; the full plot can go in the supplement.
+        """
         import matplotlib.pyplot as plt
         import matplotlib as mpl
         if self.matched_cohort is None:
@@ -390,6 +395,12 @@ class PSMCalculator:
                           f"computable SMD and are plotted at zero with a marker.")
         d["abs_pre"] = d["SMD_pre"].abs().fillna(0.0)
         d["abs_post"] = d["SMD_post"].abs().fillna(0.0)
+        if only_imbalanced:
+            d = d[d["abs_pre"] > threshold]
+            if d.empty:
+                warnings.warn(f"No covariate has |SMD| above {threshold} before "
+                              f"matching, so there is nothing to plot.")
+                return None
         d = d.sort_values("abs_pre").reset_index(drop=True)
         y = np.arange(len(d))
 
@@ -407,12 +418,13 @@ class PSMCalculator:
         ax.set_yticks(y)
         ax.set_yticklabels([f"{n} (n/a)" if u else n
                             for n, u in zip(d["covariate"], unknown)])
-        ax.set_xlabel("Absolute standardized mean difference")
-        ax.set_title("Covariate balance before and after matching", fontsize=10, pad=8)
+        ax.set_xlabel("Absolute standardised mean difference")
+        title = ("Covariates imbalanced before matching" if only_imbalanced
+                 else "Covariate balance before and after matching")
+        ax.set_title(title, fontsize=10, pad=8)
         ax.set_xlim(left=0)
         ax.tick_params(length=0)
         ax.legend(frameon=False, fontsize=8, loc="lower right")
-        ax.text(threshold, -0.8, f" {threshold}", fontsize=7, color="0.35", va="top")
         fig.tight_layout()
         if save_path:
             fig.savefig(save_path, bbox_inches="tight")

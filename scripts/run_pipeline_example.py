@@ -262,6 +262,8 @@ def main():
     psm.balance_table()
     psm.plot_overlap(save_path=os.path.join(args.out_dir, "ps_overlap.pdf"))
     psm.plot_smd(save_path=os.path.join(args.out_dir, "love_plot.pdf"))
+    psm.plot_smd(only_imbalanced=True,
+                 save_path=os.path.join(args.out_dir, "love_plot_short.pdf"))
     print()
     psm.strata_table()
 
