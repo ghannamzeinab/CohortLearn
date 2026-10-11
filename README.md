@@ -102,14 +102,13 @@ E-values.
 
 The main result should be:
 
-- Participants in the exposed arm after matching: 8,477
+- Participants in the exposed arm after matching: 8,476
 - Participants in the unexposed arm after matching: 24,919
 - Largest standardised mean difference after matching: 0.048
-- Hazard ratio: 1.91 (95% CI 1.54–2.38)
+- Hazard ratio: 1.91 (95% CI 1.54–2.37)
 
 With Docker, these numbers are identical on every machine. With conda, the last
-digit can differ between operating systems, for example an upper limit of 2.37
-instead of 2.38. The conclusion is the same.
+digit can differ between operating systems. The conclusion is the same.
 
 The terminal also prints two validation checks, run on separate synthetic datasets
 where the true effect is known:
@@ -119,7 +118,9 @@ where the true effect is known:
 - **Null:** true hazard ratio 1.00. The estimate is 1.14 (95% CI 0.92–1.40), so
   the true value is inside the interval.
 
-## Use as a library
+
+
+## Use CohortLearn in your own analysis
 
 To use CohortLearn in your own analysis:
 
